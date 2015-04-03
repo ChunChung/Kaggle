@@ -1,0 +1,172 @@
+library("parallel")
+library("data.table")
+library("ggplot2")
+library("h2o")
+library("prospectr")
+library("plyr")
+
+#file directory: under linux system use this 
+driversDirectory <- "C:/data/drivers/drivers"
+driverexample<- "C:/data/driver"
+
+numCores <- detectCores()
+results <- mclapply(seq(1, 200), function(file, driverID){
+  tripCoordinates <- fread(file.path(driversDirectory, driverID, paste0(file, ".csv")))
+  return(cbind(tripCoordinates, rep(file, nrow(tripCoordinates))))
+}, mc.cores = numCores, driverID = 1)
+
+#under Windows system use this
+driversDirectory <- "C:/data/drivers/drivers"
+driverTrip=seq(1:200)
+driverTrip=lapply(driverTrip,toString)
+
+cl <- makeCluster(numCores) 
+list=list.dirs(driversDirectory)
+list<-substring(list, 25, last = 1000000L)
+list<-as.numeric(list)
+stopCluster(cl)
+
+
+list=sort(list)
+
+
+tripcoordinates<-readingtrips(1,driverTrip)
+
+featureextraction<-function(result){
+  
+    x = savitzkyGolay(result$x, p = 2, w = 7, m = 0)
+    y = savitzkyGolay(result$y, p = 2, w = 7, m = 0)
+    ride=data.frame(list(x,y))
+    colnames(ride)=c("x","y")
+    
+    dis=distance(ride)
+    distance=sum(dis)
+    speed=distance/nrow(ride)
+    speed2=diff(dis)
+    
+    #need binning and smoothing 
+    acc=diff(dis)
+    radius=radius(x,y)
+    acc_over_acc=diff(acc)
+    
+    #distancebin=hist(dis,breaks=(seq(0,50,by=4)/(length(dis)+1)))
+    distancebin = hist(dis,breaks="FD")
+    acc_bin= hist(acc,breaks="FD")
+    radius_percentile = quantile(radius, c(.25, .50, .75,.90,.95)) 
+    acc_over_acc_bin= hist(acc_over_acc,breaks="FD")
+    speed_bin =hist(speed2,breaks="FD")
+    speed_percentile=quantile(speed2,c(.25,.50,.75,.90,.95))
+    
+    #other features from the forum: 
+    #horsepower 
+    horsepower= acc*speed
+    horsepower=hist(horsepower,breaks="FD")
+    speed_radius=speed*radius
+    speed_radius_pecentile=quantile(speed_radius,c(.25,.50,.75,.90,.95))
+    
+    
+    #need stops and calculation 
+    distance_no_stop_total=distance(ride)
+    distance_no_stop=distance_no_stop_total[ which(distance_no_stop_total > 1.5)]
+    lessstandard=distance_no_stop_total[ which(distance_no_stop_total < 1.5)]
+    stops_ratio=length(lessstandard)/ (nrow(ride)+1)
+    ride_length_no_stop = sum(distance_no_stop)
+    distance_no_stop_speed=  ride_length_no_stop / (length(distance_no_stop)+1)
+    
+    result1=c(distance,speed,stops_ratio,ride_length_no_stop,distance_no_stop_speed,list(radius_percentile),list(speed_percentile),list(speed_radius_pecentile))
+    result2=c(list(distancebin$counts),list(acc_bin$counts),list(acc_over_acc_bin$counts),list(speed_bin$counts))
+    
+    result= c(result1,result2)
+    return(result)
+    
+}
+featureextraction(tripcoordinates)
+
+
+numCores <- detectCores()
+cl <- makeCluster(numCores)  
+
+readingtrips<-function(driverID,driverTrip){
+  path = file.path(driversDirectory,driverID,paste0(driverTrip,".csv"))
+  path=as.list(path)
+  #print(path)
+  tripcoordinates <- parLapply(cl,path,fread)
+  return(tripcoordinates)
+  #print(system.time(parLapply(cl,path,fread)))
+  #print(system.time(lapply(path,fread)))
+}
+
+output="C:/data"
+readingdriver<-function(){
+   result=list()
+   final=list()
+   
+   for(i in list){
+       counter=1
+       result=readingtrips(i,driverTrip)
+      
+        for (t in result){
+         t=as.list(t)
+         driver_trip=paste("driver",i,"trip",counter,sep = "_")
+         print(driver_trip)
+         feature=featureextraction(t)
+         browser()
+         final=list(c(list(driver_trip),list(feature)))
+         #write.csv(final, file = "output/Kagglefeatures.csv")
+         counter=counter+1 
+       }
+    }
+}
+
+totaltrips=readingdriver()
+stopCluster(cl)
+
+#plot the data (two ways of plotting)
+dataTableReady2Plot <- do.call(rbind, result)
+route<- qplot(x, y, data = dataTableReady2Plot,color=,geom = "point", )
+t<- ggplot(dataTableReady2Plot,aes(x=x, y= y),colour=dataTableReady2Plot)+geom_point()
+t+scale_color_brewer(type='seq', palette=4)
+
+#Things remain to be done: 
+#Remove outilers: Density plot of outlier, density plot of all the features (smoothing)
+
+#feature engineering 
+#distance 
+#speed 
+#acceleration/ deacceleration 
+#radius (angle)
+
+#distance
+distance<-function(result){
+   distance=sqrt(diff(result$x)^2 + diff(result$y)^2)
+   return(distance)
+}
+
+#speed (standarized to km/h,since all of them are from the same interval)
+speed<-function(ride,distance){
+  speed = distance/ nrow(ride)
+  return(speed)
+}
+
+#acceleration/deacceleration 
+accleration<-function(speed){
+  accleration =diff(speed)
+  return(accleration)
+}
+
+#radius of a route 
+radius <-function(x,y){
+  y=as.numeric(y)
+  x=as.numeric(x)
+  radius=diff(atan2(y,x))
+  radius=(radius * 180)/pi
+  return(radius)
+}
+
+
+
+
+
+
+
+
